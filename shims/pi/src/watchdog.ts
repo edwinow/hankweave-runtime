@@ -77,7 +77,11 @@ export class SessionEventQueue<T> implements AsyncIterable<T> {
   }
 }
 
-export type PiWatchdogEvent = Pick<AgentSessionEvent, "type">;
+type LegacyCompactionEventType = "auto_compaction_start" | "auto_compaction_end";
+
+export type PiWatchdogEvent = {
+  type: AgentSessionEvent["type"] | LegacyCompactionEventType;
+};
 
 export function isPiWatchdogActivityEvent(event: PiWatchdogEvent): boolean {
   switch (event.type) {

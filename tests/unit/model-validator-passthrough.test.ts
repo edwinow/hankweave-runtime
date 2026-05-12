@@ -50,6 +50,13 @@ describe("Model Validator — Passthrough Providers", () => {
       expect(result.modelInfo?.providerId).toBe("pi");
       expect(result.modelInfo?.modelId).toBe("openai/gpt-5.4");
     });
+
+    test("pi/openai-codex/gpt-5.5 resolves as passthrough", () => {
+      const result = validateModel("pi/openai-codex/gpt-5.5", registry);
+      expect(result.valid).toBe(true);
+      expect(result.modelInfo?.providerId).toBe("pi");
+      expect(result.modelInfo?.modelId).toBe("openai-codex/gpt-5.5");
+    });
   });
 
   describe("passthrough ModelInfo defaults", () => {

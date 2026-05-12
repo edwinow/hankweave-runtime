@@ -10,6 +10,8 @@ interface ProviderCredentialConfig {
   envVars: readonly string[];
   apiKeySource: string;
   runtimeProvider: string;
+  useStoredAuth?: boolean;
+  missingAuthMessage?: string;
 }
 
 const PROVIDER_CREDENTIALS: Record<string, ProviderCredentialConfig> = {
@@ -27,6 +29,14 @@ const PROVIDER_CREDENTIALS: Record<string, ProviderCredentialConfig> = {
     envVars: ["OPENAI_API_KEY"],
     apiKeySource: "env",
     runtimeProvider: "openai",
+  },
+  "openai-codex": {
+    envVars: [],
+    apiKeySource: "stored",
+    runtimeProvider: "openai-codex",
+    useStoredAuth: true,
+    missingAuthMessage:
+      "Authenticate with Pi's stored openai-codex provider credentials; OPENAI_API_KEY is only used for the openai provider.",
   },
   openrouter: {
     envVars: ["OPENROUTER_API_KEY"],
@@ -50,9 +60,13 @@ function hasConfiguredEnvValue(envVars: readonly string[]): boolean {
 }
 
 export function configureAuthStorage(): AuthStorage {
-  const authStorage = AuthStorage.inMemory();
+  const authStorage = AuthStorage.create();
 
   for (const config of Object.values(PROVIDER_CREDENTIALS)) {
+    if (config.useStoredAuth) {
+      continue;
+    }
+
     const value = getConfiguredEnvValue(config.envVars);
     if (value) {
       authStorage.setRuntimeApiKey(config.runtimeProvider, value);
@@ -64,10 +78,13 @@ export function configureAuthStorage(): AuthStorage {
 
 export function getKnownApiKeyStatus(): Record<string, boolean> {
   return Object.fromEntries(
-    Object.entries(PROVIDER_CREDENTIALS).map(([provider, config]) => [
-      provider,
-      hasConfiguredEnvValue(config.envVars),
-    ]),
+    Object.entries(PROVIDER_CREDENTIALS).map(([provider, config]) => {
+      if (config.useStoredAuth) {
+        return [provider, AuthStorage.create().getAuthStatus(config.runtimeProvider).configured];
+      }
+
+      return [provider, hasConfiguredEnvValue(config.envVars)];
+    }),
   );
 }
 
@@ -87,6 +104,15 @@ export function getProviderCredentialStatus(provider: string): ProviderCredentia
     };
   }
 
+  if (config.useStoredAuth) {
+    const stored = AuthStorage.create().getAuthStatus(config.runtimeProvider);
+    return {
+      available: stored.configured,
+      apiKeySource: stored.configured ? (stored.source ?? config.apiKeySource) : "none",
+      envVars: config.envVars,
+    };
+  }
+
   const available = hasConfiguredEnvValue(config.envVars);
   return {
     available,
@@ -100,6 +126,11 @@ export function shouldEnforceProviderCredential(provider: string): boolean {
 }
 
 export function formatMissingApiKeyMessage(provider: string): string {
+  const config = PROVIDER_CREDENTIALS[provider.toLowerCase()];
+  if (config?.useStoredAuth) {
+    return `Missing stored authentication for provider '${provider}'. ${config.missingAuthMessage ?? "Authenticate with Pi's stored provider credentials."}`;
+  }
+
   const status = getProviderCredentialStatus(provider);
   if (status.envVars.length === 0) {
     return `Missing API key for provider '${provider}'.`;

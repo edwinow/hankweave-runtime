@@ -7,14 +7,8 @@ import {
   type SessionInfo,
   VERSION as PI_VERSION,
   createAgentSession,
-  createBashTool,
-  createEditTool,
-  createFindTool,
-  createGrepTool,
-  createLsTool,
-  createReadTool,
-  createWriteTool,
   DefaultResourceLoader,
+  getAgentDir,
   ModelRegistry,
   SessionManager,
 } from "@mariozechner/pi-coding-agent";
@@ -87,7 +81,7 @@ interface ResolvedModelIdentifier {
   modelId: string;
 }
 
-const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const MODEL_SHORTNAMES: Record<string, string> = {
   sonnet: "anthropic/claude-sonnet-4-5",
@@ -225,8 +219,9 @@ export async function preparePiSession(options: {
 }): Promise<PreparedPiSession> {
   const { cwd, args, verbose } = options;
   const sessionDir = getSessionStorageDir(args.debugDir);
+  const agentDir = getAgentDir();
   const authStorage = configureAuthStorage();
-  const modelRegistry = new ModelRegistry(authStorage);
+  const modelRegistry = ModelRegistry.create(authStorage);
   const { resolved, provider, modelId } = resolveModelIdentifier(options.model);
 
   if (shouldEnforceProviderCredential(provider) && !getProviderCredentialStatus(provider).available) {
@@ -243,26 +238,20 @@ export async function preparePiSession(options: {
   const sessionManager = await createSessionManager(cwd, args.resume, sessionDir);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
+    agentDir,
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    ...(args.appendSystemPrompt ? { appendSystemPrompt: args.appendSystemPrompt } : {}),
+    ...(args.appendSystemPrompt ? { appendSystemPrompt: [args.appendSystemPrompt] } : {}),
   });
   await resourceLoader.reload();
 
   const { session } = await createAgentSession({
     cwd,
+    agentDir,
     model: resolvedModel,
-    tools: [
-      createReadTool(cwd),
-      createBashTool(cwd),
-      createEditTool(cwd),
-      createWriteTool(cwd),
-      createGrepTool(cwd),
-      createFindTool(cwd),
-      createLsTool(cwd),
-    ],
+    tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
     sessionManager,
     authStorage,
     modelRegistry,
@@ -270,7 +259,7 @@ export async function preparePiSession(options: {
   });
 
   const sessionId = args.resume ?? session.sessionId;
-  if (!UUID_V4_REGEX.test(sessionId)) {
+  if (!UUID_REGEX.test(sessionId)) {
     throw new StartupError(`Pi returned a non-UUID session id: ${sessionId}`);
   }
 
@@ -521,8 +510,8 @@ export async function runPiPrompt(
 }
 
 export function validateResumeSessionId(sessionId: string): void {
-  if (!UUID_V4_REGEX.test(sessionId)) {
-    throw new StartupError(`Invalid session ID format: ${sessionId}. Expected UUID v4.`);
+  if (!UUID_REGEX.test(sessionId)) {
+    throw new StartupError(`Invalid session ID format: ${sessionId}. Expected UUID.`);
   }
 }
 
@@ -534,7 +523,7 @@ export async function checkPiAvailability(): Promise<{
 }> {
   try {
     const authStorage = configureAuthStorage();
-    const modelRegistry = new ModelRegistry(authStorage);
+    const modelRegistry = ModelRegistry.create(authStorage);
     const availableModels = modelRegistry
       .getAvailable()
       .slice(0, 10)
