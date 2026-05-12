@@ -23,6 +23,10 @@ tests/test-results
 hankweave-results
 .hankweave
 !tests/fixtures/**/.hankweave
+
+# Cache-aware sentinel demo: generated fixtures and replay results
+learning/examples/cache-aware-conversational-sentinel/data/test-files/
+learning/examples/cache-aware-conversational-sentinel/results/
 error
 .sync-test-output
 

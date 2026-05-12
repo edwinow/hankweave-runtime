@@ -1,0 +1,36 @@
+{
+  "id": "observer-maxturns",
+  "name": "Cache-demo baseline observer (maxTurns)",
+  "description": "Baseline conversational sentinel with the existing maxTurns trimming strategy and NO cache config. Used as the comparison floor in the cache-aware demo.",
+  "trigger": {
+    "type": "event",
+    "on": ["tool.result"]
+  },
+  "execution": {
+    "strategy": "immediate"
+  },
+  "model": "anthropic/claude-haiku-4-5",
+  "systemPromptText": "You are a silent observer for a cache-cost demonstration. Your job is to be cheap and predictable, not insightful. The codon reads files one by one; for each tool.result event you receive, reply with the single word 'ack'. Do not summarise, do not analyse, do not ask questions, do not number the response. Brevity is the entire point. The conversational history is intentionally retained so cache behaviour can be measured across many fires.",
+  "userPromptText": "Tool result event:\n<%= JSON.stringify(it.events, null, 2) %>\n\nReply with exactly one word: 'ack'. Nothing else.",
+  "conversational": {
+    "trimmingStrategy": {
+      "type": "maxTurns",
+      "maxTurns": 70
+    },
+    "continueOnError": true
+  },
+  "output": {
+    "format": "text",
+    "file": "sentinel-observer-maxturns.md"
+  },
+  "joinString": "\n",
+  "llmParams": {
+    "temperature": 0,
+    "maxOutputTokens": 64,
+    "maxRetries": 2
+  },
+  "errorHandling": {
+    "maxConsecutiveFailures": 5,
+    "unloadOnFatalError": false
+  }
+}

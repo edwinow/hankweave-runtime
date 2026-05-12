@@ -1,0 +1,45 @@
+{
+  "id": "observer-chunked",
+  "name": "Cache-demo proposed observer (chunkedWindow + cache)",
+  "description": "Proposed conversational sentinel using chunkedWindow trimming + Anthropic ephemeral cacheControl on the last historical message. Used as the comparison ceiling in the cache-aware demo.",
+  "trigger": {
+    "type": "event",
+    "on": ["tool.result"]
+  },
+  "execution": {
+    "strategy": "immediate"
+  },
+  "model": "anthropic/claude-haiku-4-5",
+  "systemPromptText": "You are a silent observer for a cache-cost demonstration. Your job is to be cheap and predictable, not insightful. The codon reads files one by one; for each tool.result event you receive, reply with the single word 'ack'. Do not summarise, do not analyse, do not ask questions, do not number the response. Brevity is the entire point. The conversational history is intentionally retained so cache behaviour can be measured across many fires.",
+  "userPromptText": "Tool result event:\n<%= JSON.stringify(it.events, null, 2) %>\n\nReply with exactly one word: 'ack'. Nothing else.",
+  "conversational": {
+    "trimmingStrategy": {
+      "type": "chunkedWindow",
+      "maxTurns": 70,
+      "shiftTurns": 20
+    },
+    "cache": {
+      "breakpoint": "lastMessage",
+      "providerOptions": {
+        "anthropic": {
+          "cacheControl": { "type": "ephemeral" }
+        }
+      }
+    },
+    "continueOnError": true
+  },
+  "output": {
+    "format": "text",
+    "file": "sentinel-observer-chunked.md"
+  },
+  "joinString": "\n",
+  "llmParams": {
+    "temperature": 0,
+    "maxOutputTokens": 64,
+    "maxRetries": 2
+  },
+  "errorHandling": {
+    "maxConsecutiveFailures": 5,
+    "unloadOnFatalError": false
+  }
+}

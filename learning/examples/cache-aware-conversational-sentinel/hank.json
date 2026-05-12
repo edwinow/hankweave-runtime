@@ -1,0 +1,41 @@
+{
+  "$schema": "https://unpkg.com/hankweave@latest/schemas/hank.schema.json",
+  "meta": {
+    "name": "cache-aware-conversational-sentinel",
+    "version": "0.1.0",
+    "description": "Demo hank that fires two observer sentinels in parallel against the same workload: a baseline maxTurns observer and a chunkedWindow + Anthropic ephemeral-cache observer. Used to measure end-to-end cache savings on a long-history conversational sentinel."
+  },
+  "hank": [
+    {
+      "id": "1-read-test-files",
+      "name": "Read test files sequentially",
+      "description": "Walks ./data/test-files/ one Read call at a time so each tool.result event drives both observer sentinels.",
+      "promptFile": ["./codons/1-read-test-files/prompt.md"],
+      "model": "haiku",
+      "continuationMode": "fresh",
+      "rigSetup": [],
+      "checkpointedFiles": [],
+      "outputFiles": [],
+      "sentinels": [
+        {
+          "sentinelConfig": "./sentinels/observer-maxturns.json",
+          "settings": {
+            "failCodonIfNotLoaded": true,
+            "outputPaths": {
+              "logFile": "./sentinel-observer-maxturns.md"
+            }
+          }
+        },
+        {
+          "sentinelConfig": "./sentinels/observer-chunked.json",
+          "settings": {
+            "failCodonIfNotLoaded": true,
+            "outputPaths": {
+              "logFile": "./sentinel-observer-chunked.md"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
