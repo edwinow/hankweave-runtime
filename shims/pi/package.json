@@ -14,6 +14,7 @@
     "tsconfig.json",
     "index.js",
     "dist",
+    "scripts",
     "src",
     "common",
     "docs",
@@ -23,7 +24,7 @@
     "THIRDPARTY.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.js --target node --bundle && node -e \"const fs=require('fs');const p='dist/index.js';let c=fs.readFileSync(p,'utf8');c=c.replace(/^#!.*\\n/,'');fs.writeFileSync(p,'#!/usr/bin/env node\\n'+c);fs.chmodSync(p,0o755);fs.copyFileSync(p,'index.js');fs.chmodSync('index.js',0o755);\"",
+    "build": "bun build src/index.ts --outfile dist/index.js --target node --bundle && node scripts/finalize-bundle.cjs",
     "dev": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
@@ -32,7 +33,7 @@
     "self-test": "node index.js --self-test"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.57.1",
+    "@mariozechner/pi-coding-agent": "0.73.1",
     "@shims/common": "file:./common"
   },
   "devDependencies": {
