@@ -474,6 +474,14 @@ export const sentinelOutputEventDataSchema = z.object({
   tokens: z.object({
     input: z.number(),
     output: z.number(),
+    cachedInputTokens: z
+      .number()
+      .optional()
+      .describe("Cache reads (AI SDK v5). Already excluded from `input`."),
+    cacheCreationInputTokens: z
+      .number()
+      .optional()
+      .describe("Cache writes (Anthropic). Already excluded from `input`."),
   }),
   eventCount: z.number(),
 });

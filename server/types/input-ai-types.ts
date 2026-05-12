@@ -32,8 +32,8 @@ const hankweaveDataContentSchema = z.union([
  * JSON value schema compatible with the AI SDK JSONValue type.
  * Allows null, primitive types, arrays and objects with string keys.
  */
-type JsonValue = null | string | number | boolean | { [k: string]: JsonValue } | JsonValue[];
-const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+export type JsonValue = null | string | number | boolean | { [k: string]: JsonValue } | JsonValue[];
+export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.null(),
     z.string(),
@@ -43,6 +43,16 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.record(jsonValueSchema),
   ]),
 );
+
+/**
+ * Provider-options schema matching AI SDK v5's `SharedV2ProviderOptions`:
+ * `Record<string, Record<string, JSONValue>>`.
+ *
+ * Two-level shape: outer keyed by provider id (e.g. "anthropic"), inner keyed
+ * by option name (e.g. "cacheControl"), values JSON-serialisable.
+ */
+export const providerOptionsSchema = z.record(z.string(), z.record(z.string(), jsonValueSchema));
+export type ProviderOptionsValue = z.infer<typeof providerOptionsSchema>;
 
 /**
  * Tool result "content" value parts (used when output.type === 'content').
@@ -75,6 +85,11 @@ export const hankweaveTextPartSchema = z
   .object({
     type: z.literal("text"),
     text: z.string(),
+    providerOptions: providerOptionsSchema
+      .optional()
+      .describe(
+        "Provider-specific options for this text part (e.g. anthropic cacheControl). Two-level shape: { <provider>: { <option>: <value> } }.",
+      ),
   })
   .strict();
 

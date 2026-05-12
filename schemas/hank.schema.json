@@ -899,11 +899,83 @@
                                             "maxTokens"
                                           ],
                                           "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string",
+                                              "const": "chunkedWindow"
+                                            },
+                                            "maxTurns": {
+                                              "type": "integer",
+                                              "exclusiveMinimum": 0,
+                                              "maximum": 200,
+                                              "description": "Max stored complete turns before a shift fires. Shift triggers when stored turns strictly exceed this value (i.e. on the call that would otherwise produce maxTurns + 1)."
+                                            },
+                                            "shiftTurns": {
+                                              "type": "integer",
+                                              "exclusiveMinimum": 0,
+                                              "maximum": 200,
+                                              "description": "How many oldest turns (user+assistant pairs) to drop when a shift fires. Each turn = 2 messages. Must be ≤ maxTurns."
+                                            }
+                                          },
+                                          "required": [
+                                            "type",
+                                            "maxTurns",
+                                            "shiftTurns"
+                                          ],
+                                          "additionalProperties": false
                                         }
                                       ]
                                     },
                                     "continueOnError": {
                                       "type": "boolean"
+                                    },
+                                    "cache": {
+                                      "type": "object",
+                                      "properties": {
+                                        "breakpoint": {
+                                          "type": "string",
+                                          "const": "lastMessage"
+                                        },
+                                        "providerOptions": {
+                                          "type": "object",
+                                          "additionalProperties": {
+                                            "type": "object",
+                                            "additionalProperties": {
+                                              "anyOf": [
+                                                {
+                                                  "type": "null"
+                                                },
+                                                {
+                                                  "type": "string"
+                                                },
+                                                {
+                                                  "type": "number"
+                                                },
+                                                {
+                                                  "type": "boolean"
+                                                },
+                                                {
+                                                  "type": "array",
+                                                  "items": {}
+                                                },
+                                                {
+                                                  "type": "object",
+                                                  "additionalProperties": {}
+                                                }
+                                              ]
+                                            }
+                                          }
+                                        }
+                                      },
+                                      "required": [
+                                        "breakpoint",
+                                        "providerOptions"
+                                      ],
+                                      "additionalProperties": false,
+                                      "description": "Optional cache-breakpoint configuration for conversational sentinels. When set with anthropic.cacheControl, the last historical message before the live current user is converted to parts-form at send time and marked with the provider option, maximising the cacheable prefix."
                                     }
                                   },
                                   "required": [
@@ -946,6 +1018,37 @@
                                       "minimum": 0,
                                       "maximum": 5,
                                       "description": "Number of retry attempts for failed LLM calls"
+                                    },
+                                    "providerOptions": {
+                                      "type": "object",
+                                      "additionalProperties": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                          "anyOf": [
+                                            {
+                                              "type": "null"
+                                            },
+                                            {
+                                              "type": "string"
+                                            },
+                                            {
+                                              "type": "number"
+                                            },
+                                            {
+                                              "type": "boolean"
+                                            },
+                                            {
+                                              "type": "array",
+                                              "items": {}
+                                            },
+                                            {
+                                              "type": "object",
+                                              "additionalProperties": {}
+                                            }
+                                          ]
+                                        }
+                                      },
+                                      "description": "Provider-specific options passed through to the AI SDK (e.g. openai.promptCacheKey, anthropic cacheControl). Two-level shape: { <provider>: { <option>: <value> } }."
                                     }
                                   },
                                   "additionalProperties": false
@@ -2016,11 +2119,83 @@
                                                   "maxTokens"
                                                 ],
                                                 "additionalProperties": false
+                                              },
+                                              {
+                                                "type": "object",
+                                                "properties": {
+                                                  "type": {
+                                                    "type": "string",
+                                                    "const": "chunkedWindow"
+                                                  },
+                                                  "maxTurns": {
+                                                    "type": "integer",
+                                                    "exclusiveMinimum": 0,
+                                                    "maximum": 200,
+                                                    "description": "Max stored complete turns before a shift fires. Shift triggers when stored turns strictly exceed this value (i.e. on the call that would otherwise produce maxTurns + 1)."
+                                                  },
+                                                  "shiftTurns": {
+                                                    "type": "integer",
+                                                    "exclusiveMinimum": 0,
+                                                    "maximum": 200,
+                                                    "description": "How many oldest turns (user+assistant pairs) to drop when a shift fires. Each turn = 2 messages. Must be ≤ maxTurns."
+                                                  }
+                                                },
+                                                "required": [
+                                                  "type",
+                                                  "maxTurns",
+                                                  "shiftTurns"
+                                                ],
+                                                "additionalProperties": false
                                               }
                                             ]
                                           },
                                           "continueOnError": {
                                             "type": "boolean"
+                                          },
+                                          "cache": {
+                                            "type": "object",
+                                            "properties": {
+                                              "breakpoint": {
+                                                "type": "string",
+                                                "const": "lastMessage"
+                                              },
+                                              "providerOptions": {
+                                                "type": "object",
+                                                "additionalProperties": {
+                                                  "type": "object",
+                                                  "additionalProperties": {
+                                                    "anyOf": [
+                                                      {
+                                                        "type": "null"
+                                                      },
+                                                      {
+                                                        "type": "string"
+                                                      },
+                                                      {
+                                                        "type": "number"
+                                                      },
+                                                      {
+                                                        "type": "boolean"
+                                                      },
+                                                      {
+                                                        "type": "array",
+                                                        "items": {}
+                                                      },
+                                                      {
+                                                        "type": "object",
+                                                        "additionalProperties": {}
+                                                      }
+                                                    ]
+                                                  }
+                                                }
+                                              }
+                                            },
+                                            "required": [
+                                              "breakpoint",
+                                              "providerOptions"
+                                            ],
+                                            "additionalProperties": false,
+                                            "description": "Optional cache-breakpoint configuration for conversational sentinels. When set with anthropic.cacheControl, the last historical message before the live current user is converted to parts-form at send time and marked with the provider option, maximising the cacheable prefix."
                                           }
                                         },
                                         "required": [
@@ -2063,6 +2238,37 @@
                                             "minimum": 0,
                                             "maximum": 5,
                                             "description": "Number of retry attempts for failed LLM calls"
+                                          },
+                                          "providerOptions": {
+                                            "type": "object",
+                                            "additionalProperties": {
+                                              "type": "object",
+                                              "additionalProperties": {
+                                                "anyOf": [
+                                                  {
+                                                    "type": "null"
+                                                  },
+                                                  {
+                                                    "type": "string"
+                                                  },
+                                                  {
+                                                    "type": "number"
+                                                  },
+                                                  {
+                                                    "type": "boolean"
+                                                  },
+                                                  {
+                                                    "type": "array",
+                                                    "items": {}
+                                                  },
+                                                  {
+                                                    "type": "object",
+                                                    "additionalProperties": {}
+                                                  }
+                                                ]
+                                              }
+                                            },
+                                            "description": "Provider-specific options passed through to the AI SDK (e.g. openai.promptCacheKey, anthropic cacheControl). Two-level shape: { <provider>: { <option>: <value> } }."
                                           }
                                         },
                                         "additionalProperties": false

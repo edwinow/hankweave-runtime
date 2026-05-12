@@ -10,7 +10,7 @@
 
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import { hankweaveModelMessageSchema } from "./input-ai-types.js";
+import { hankweaveModelMessageSchema, providerOptionsSchema } from "./input-ai-types.js";
 
 // --- Base Schemas ---
 
@@ -40,6 +40,11 @@ export const hankweaveLlmCallParamsSchema = z.object({
     .max(5)
     .optional()
     .describe("Number of retry attempts for failed LLM calls"),
+  providerOptions: providerOptionsSchema
+    .optional()
+    .describe(
+      "Provider-specific options passed through to the AI SDK (e.g. openai.promptCacheKey, anthropic cacheControl). Two-level shape: { <provider>: { <option>: <value> } }.",
+    ),
 });
 
 // --- `generateText` Schemas ---
@@ -69,6 +74,18 @@ export const hankweaveGenerateTextResultSchema = z.object({
   usage: z.object({
     inputTokens: z.number(),
     outputTokens: z.number(),
+    cachedInputTokens: z
+      .number()
+      .optional()
+      .describe(
+        "Cache reads (AI SDK v5 flat field). Already EXCLUDED from inputTokens for Anthropic.",
+      ),
+    cacheCreationInputTokens: z
+      .number()
+      .optional()
+      .describe(
+        "Cache writes (Anthropic-specific, sourced from providerMetadata.anthropic.cacheCreationInputTokens). Already excluded from inputTokens.",
+      ),
   }),
 });
 
@@ -123,6 +140,18 @@ export const hankweaveGenerateObjectResultSchema = z.object({
   usage: z.object({
     inputTokens: z.number(),
     outputTokens: z.number(),
+    cachedInputTokens: z
+      .number()
+      .optional()
+      .describe(
+        "Cache reads (AI SDK v5 flat field). Already EXCLUDED from inputTokens for Anthropic.",
+      ),
+    cacheCreationInputTokens: z
+      .number()
+      .optional()
+      .describe(
+        "Cache writes (Anthropic-specific, sourced from providerMetadata.anthropic.cacheCreationInputTokens). Already excluded from inputTokens.",
+      ),
   }),
 });
 
@@ -147,6 +176,54 @@ export type HankweaveGenerateObjectResult<T> = Omit<
   z.infer<typeof hankweaveGenerateObjectResultSchema>,
   "object"
 > & { object: T };
+
+// --- Cache-aware usage + pricing ---
+
+/**
+ * Cache-aware usage shape used by Sentinel cost accounting.
+ *
+ * Field semantics:
+ * - Anthropic: `inputTokens` ALREADY excludes the cached read portion
+ *   (the SDK reports it at top level).
+ * - OpenAI: `inputTokens` includes cached read tokens
+ *   (the SDK maps `prompt_tokens` to `inputTokens` and
+ *   `prompt_tokens_details.cached_tokens` to `cachedInputTokens`).
+ * - `cachedInputTokens` is the AI SDK v5 flat field for cache READS.
+ * - `cacheCreationInputTokens` is sourced from `providerMetadata.anthropic.cacheCreationInputTokens`
+ *   and represents cache WRITES. Anthropic-only; absent for other providers.
+ */
+export type CacheAwareUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
+};
+
+/**
+ * Per-million pricing in USD (cache fields optional — fall back to `input` rate).
+ */
+export type ModelCost = {
+  providerId?: string;
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+};
+
+/**
+ * Pricing shape as it lives in `models-dev-data.json` (snake_case).
+ * Used at the registry → ModelCost mapping boundary in SentinelManager.
+ *
+ * All fields are optional because the upstream registry doesn't guarantee
+ * any particular field's presence (especially for the cache fields, which
+ * are only populated for providers that expose explicit cache pricing).
+ */
+export interface ModelPricing {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+}
 
 // --- Structured Output Context ---
 

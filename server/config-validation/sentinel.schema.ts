@@ -4,6 +4,7 @@ import {
   serverEventDataSchemas,
   serverEventTypes,
 } from "../schemas/event-schemas.js";
+import { providerOptionsSchema } from "../types/input-ai-types.js";
 import { hankweaveLlmCallParamsSchema } from "../types/llm-call-types.js";
 
 // Helper function to check if a string is a valid event type or wildcard
@@ -299,16 +300,48 @@ export const sentinelExecutionSchema = z.discriminatedUnion("strategy", [
 
 // --- Trimming Strategy Schema (for Conversational mode) ---
 // Intent: Define how the conversation history is pruned to stay within LLM context limits
-const trimmingStrategySchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("maxTurns"),
-    maxTurns: z.number().int().positive().max(100),
-  }),
-  z.object({
-    type: z.literal("maxTokens"),
-    maxTokens: z.number().int().positive().max(100000),
-  }),
-]);
+const trimmingStrategySchema = z
+  .discriminatedUnion("type", [
+    z.object({
+      type: z.literal("maxTurns"),
+      maxTurns: z.number().int().positive().max(100),
+    }),
+    z.object({
+      type: z.literal("maxTokens"),
+      maxTokens: z.number().int().positive().max(100000),
+    }),
+    z.object({
+      type: z.literal("chunkedWindow"),
+      maxTurns: z
+        .number()
+        .int()
+        .positive()
+        .max(200)
+        .describe(
+          "Max stored complete turns before a shift fires. Shift triggers when stored " +
+            "turns strictly exceed this value (i.e. on the call that would otherwise produce " +
+            "maxTurns + 1).",
+        ),
+      shiftTurns: z
+        .number()
+        .int()
+        .positive()
+        .max(200)
+        .describe(
+          "How many oldest turns (user+assistant pairs) to drop when a shift fires. " +
+            "Each turn = 2 messages. Must be ≤ maxTurns.",
+        ),
+    }),
+  ])
+  .superRefine((data, ctx) => {
+    if (data.type === "chunkedWindow" && data.shiftTurns > data.maxTurns) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "shiftTurns must be ≤ maxTurns",
+        path: ["shiftTurns"],
+      });
+    }
+  });
 
 // --- Error Handling Schema ---
 // Intent: Configure sentinel error handling behavior
@@ -394,6 +427,75 @@ export const sentinelConfigSchema = z
       .object({
         trimmingStrategy: trimmingStrategySchema,
         continueOnError: z.boolean().optional(),
+        cache: z
+          .object({
+            breakpoint: z.literal("lastMessage"),
+            providerOptions: providerOptionsSchema.superRefine((data, ctx) => {
+              if (Object.keys(data).length === 0) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message:
+                    "conversational.cache.providerOptions must include at least one provider",
+                });
+                return;
+              }
+              for (const [provider, options] of Object.entries(data)) {
+                if (Object.keys(options).length === 0) {
+                  ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: `conversational.cache.providerOptions.${provider} must include at least one option`,
+                    path: [provider],
+                  });
+                }
+              }
+
+              // If anthropic.cacheControl is set, validate its shape strictly so a
+              // typo'd `type` (e.g. "epheneral") fails at config-load rather than
+              // at the Anthropic API. Other providers stay permissive.
+              const anthropic = data.anthropic as Record<string, unknown> | undefined;
+              if (!anthropic) return;
+              const cc = anthropic.cacheControl as Record<string, unknown> | undefined;
+              if (cc === undefined) return;
+              if (typeof cc !== "object" || cc === null || Array.isArray(cc)) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message: "anthropic.cacheControl must be an object",
+                  path: ["anthropic", "cacheControl"],
+                });
+                return;
+              }
+              for (const key of Object.keys(cc)) {
+                if (key !== "type" && key !== "ttl") {
+                  ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: "anthropic.cacheControl only supports type and ttl",
+                    path: ["anthropic", "cacheControl", key],
+                  });
+                }
+              }
+              if (cc.type !== "ephemeral") {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message: 'anthropic.cacheControl.type must be exactly "ephemeral"',
+                  path: ["anthropic", "cacheControl", "type"],
+                });
+              }
+              if (cc.ttl !== undefined && cc.ttl !== "5m" && cc.ttl !== "1h") {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message: 'anthropic.cacheControl.ttl must be "5m" or "1h" when present',
+                  path: ["anthropic", "cacheControl", "ttl"],
+                });
+              }
+            }),
+          })
+          .optional()
+          .describe(
+            "Optional cache-breakpoint configuration for conversational sentinels. " +
+              "When set with anthropic.cacheControl, the last historical message before " +
+              "the live current user is converted to parts-form at send time and marked " +
+              "with the provider option, maximising the cacheable prefix.",
+          ),
       })
       .optional(),
 
