@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { SentinelConfig } from "../../server/config-validation/sentinel.schema.js";
 import type { LlmProviderRegistry } from "../../server/llm/llm-provider-registry.js";
-import { SentinelManager } from "../../server/sentinels/sentinel-manager.js";
+import {
+  getAnthropicCacheCreationInputTokens,
+  SentinelManager,
+} from "../../server/sentinels/sentinel-manager.js";
 import type { CodonId } from "../../server/types/branded-types.js";
 import type {
   HankweaveGenerateTextOptions,
@@ -174,6 +177,25 @@ describe("SentinelManager - Large Tasks", () => {
   });
 
   describe("Cost Tracking (Task 2)", () => {
+    test("normalizes null Anthropic cache creation metadata to undefined", () => {
+      expect(
+        getAnthropicCacheCreationInputTokens({
+          anthropic: { cacheCreationInputTokens: null },
+        }),
+      ).toBeUndefined();
+      expect(
+        getAnthropicCacheCreationInputTokens({
+          anthropic: { cacheCreationInputTokens: 123 },
+        }),
+      ).toBe(123);
+      expect(
+        getAnthropicCacheCreationInputTokens({
+          anthropic: { cacheCreationInputTokens: "123" },
+        }),
+      ).toBeUndefined();
+      expect(getAnthropicCacheCreationInputTokens(undefined)).toBeUndefined();
+    });
+
     test("should calculate and return cost from LLM calls", async () => {
       const mockRegistry = new MockLlmProviderRegistry();
       mockRegistry.setProviderAvailable("anthropic", true);

@@ -8,6 +8,7 @@ import type {
   HankweaveGenerateObjectResult,
   HankweaveGenerateTextOptions,
   HankweaveGenerateTextResult,
+  ModelCost,
 } from "../types/llm-call-types.js";
 import type {
   QueuedTrigger,
@@ -17,6 +18,8 @@ import type {
 } from "../types/sentinel-types.js";
 import { generateId, type Logger, renameWithRetrySync } from "../utils.js";
 import "../../tests/types/global-test-types.js";
+import { applyAnthropicCacheControlBreakpoint } from "./cache-control.js";
+import { computeCost, warnOnceCacheFallback } from "./cost.js";
 import { HistoryManager } from "./history-manager.js";
 import { type TemplateContext, TemplateRenderer } from "./prompt-templating-engine.js";
 import { mergeWithDefaults } from "./sentinel-defaults.js";
@@ -83,13 +86,10 @@ export class Sentinel {
   private readonly userPromptTemplate: string;
   private readonly systemPromptTemplate: string | undefined;
   private readonly runStartTime: Date;
-  private readonly llmParams: {
-    temperature: number;
-    maxOutputTokens: number;
-    maxRetries: number;
-  };
+  private readonly llmParams: ReturnType<typeof mergeWithDefaults>;
+  private readonly cacheConfig?: NonNullable<SentinelConfig["conversational"]>["cache"];
   private totalCost: number = 0; // Track cumulative costs for this sentinel
-  private modelCost?: { input: number; output: number }; // Cost per million tokens
+  private modelCost?: ModelCost; // Cache-aware per-million pricing (input/output + optional cacheRead/cacheWrite)
   private readonly structuredOutputContext?: StructuredOutputContext; // For structured output mode
   private readonly outputPaths: {
     continuousLog: string;
@@ -114,7 +114,7 @@ export class Sentinel {
     configDirectory?: string, // For resolving relative prompt file paths
     runStartTime?: Date, // Start time of the current run
     private onExecute?: (id: string, events: ServerEvent[]) => void,
-    modelCost?: { input: number; output: number }, // Optional cost per million tokens
+    modelCost?: ModelCost, // Optional cache-aware per-million pricing
     private llmObjectCall?: (
       id: string,
       options: HankweaveGenerateObjectOptions,
@@ -191,6 +191,8 @@ export class Sentinel {
         sentinelDir, // May be undefined - that's OK, runs in memory-only mode
         this.logger,
       );
+
+      this.cacheConfig = config.conversational.cache;
 
       this.logger?.log(
         `[Sentinel:${config.id}] Initialized conversational mode with ${config.conversational.trimmingStrategy.type} trimming`,
@@ -271,6 +273,77 @@ export class Sentinel {
 
     // For immediate strategy, await the processing to propagate fatal errors to manager
     await this.queueProcessingPromise;
+  }
+
+  /**
+   * Build typed AnthropicCacheControlOptions from this sentinel's cache config,
+   * or return undefined when caching is not enabled. Centralises the narrowing
+   * cast that the schema's superRefine on `conversational.cache.providerOptions`
+   * has already validated at config-load time.
+   */
+  private buildCacheOptions():
+    | Parameters<typeof applyAnthropicCacheControlBreakpoint>[1]
+    | undefined {
+    if (!this.cacheConfig?.providerOptions?.anthropic?.cacheControl) {
+      return undefined;
+    }
+    return {
+      breakpoint: this.cacheConfig.breakpoint,
+      providerOptions: this.cacheConfig.providerOptions as {
+        anthropic: { cacheControl: { type: "ephemeral"; ttl?: "5m" | "1h" } };
+      },
+    };
+  }
+
+  /**
+   * Merge generic sentinel provider options with cache-specific request-level
+   * provider options. Anthropic's `cacheControl` in the cache block is a
+   * message-part marker, so it is deliberately not forwarded at top level.
+   * OpenAI uses request-level `promptCacheKey` / `promptCacheRetention`, so
+   * those options must reach the AI SDK even when no Anthropic marker is present.
+   */
+  private buildProviderOptions(): ReturnType<typeof mergeWithDefaults>["providerOptions"] {
+    const base = this.llmParams.providerOptions;
+    const cache = this.buildRequestLevelCacheProviderOptions();
+    if (!cache) return base;
+    if (!base) return cache;
+
+    return {
+      ...base,
+      ...cache,
+      ...Object.fromEntries(
+        Object.entries(cache).map(([provider, options]) => [
+          provider,
+          {
+            ...(base[provider] ?? {}),
+            ...options,
+          },
+        ]),
+      ),
+    };
+  }
+
+  private buildRequestLevelCacheProviderOptions():
+    | NonNullable<ReturnType<typeof mergeWithDefaults>["providerOptions"]>
+    | undefined {
+    const cache = this.cacheConfig?.providerOptions;
+    if (!cache) return undefined;
+
+    const requestLevelOptions: NonNullable<
+      ReturnType<typeof mergeWithDefaults>["providerOptions"]
+    > = {};
+
+    for (const [provider, options] of Object.entries(cache)) {
+      const cleanedOptions = { ...options };
+      if (provider === "anthropic") {
+        delete cleanedOptions.cacheControl;
+      }
+      if (Object.keys(cleanedOptions).length > 0) {
+        requestLevelOptions[provider] = cleanedOptions;
+      }
+    }
+
+    return Object.keys(requestLevelOptions).length > 0 ? requestLevelOptions : undefined;
   }
 
   /**
@@ -488,7 +561,15 @@ export class Sentinel {
           `[Sentinel:${this.config.id}] Conversational sentinels require a system prompt`,
         );
       }
-      const messages = await this.historyManager.getMessagesToSend(renderedSystemPrompt);
+      let messages = await this.historyManager.getMessagesToSend(renderedSystemPrompt);
+
+      // Apply Anthropic cache breakpoint to the last historical message BEFORE
+      // pushing the live current user. Storage stays string-form; helper clones.
+      const cacheOptions = this.buildCacheOptions();
+      if (cacheOptions) {
+        messages = applyAnthropicCacheControlBreakpoint(messages, cacheOptions);
+      }
+
       messages.push({ role: "user", content: userMessage });
 
       const options: HankweaveGenerateTextOptions = {
@@ -496,6 +577,7 @@ export class Sentinel {
         temperature: this.llmParams.temperature,
         maxOutputTokens: this.llmParams.maxOutputTokens,
         maxRetries: this.llmParams.maxRetries,
+        providerOptions: this.buildProviderOptions(),
       };
 
       try {
@@ -504,16 +586,20 @@ export class Sentinel {
         // Track successful call
         this.trackSuccessfulLLMCall();
 
-        // Calculate and track cost
+        // Calculate and track cost (cache-aware via shared helper)
         let callCost = 0;
         if (this.modelCost && response.usage) {
-          const cost =
-            (response.usage.inputTokens / 1_000_000) * this.modelCost.input +
-            (response.usage.outputTokens / 1_000_000) * this.modelCost.output;
-          this.totalCost += cost;
-          callCost = cost;
+          callCost = computeCost(response.usage, this.modelCost);
+          this.totalCost += callCost;
+          warnOnceCacheFallback(
+            this.logger,
+            this.config.id,
+            this.config.model,
+            this.modelCost,
+            response.usage,
+          );
           this.logger?.log(
-            `[Sentinel:${this.config.id}] LLM call cost: $${cost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
+            `[Sentinel:${this.config.id}] LLM call cost: $${callCost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
             "info",
           );
         }
@@ -539,6 +625,8 @@ export class Sentinel {
               tokens: {
                 input: response.usage?.inputTokens || 0,
                 output: response.usage?.outputTokens || 0,
+                cachedInputTokens: response.usage?.cachedInputTokens,
+                cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
               },
               eventCount: 1, // Will be updated when we have access to trigger.events
             },
@@ -595,6 +683,7 @@ export class Sentinel {
         temperature: this.llmParams.temperature,
         maxOutputTokens: this.llmParams.maxOutputTokens,
         maxRetries: this.llmParams.maxRetries,
+        providerOptions: this.buildProviderOptions(),
       };
 
       try {
@@ -605,13 +694,17 @@ export class Sentinel {
 
         let callCost = 0;
         if (this.modelCost && response.usage) {
-          const cost =
-            (response.usage.inputTokens / 1_000_000) * this.modelCost.input +
-            (response.usage.outputTokens / 1_000_000) * this.modelCost.output;
-          this.totalCost += cost;
-          callCost = cost;
+          callCost = computeCost(response.usage, this.modelCost);
+          this.totalCost += callCost;
+          warnOnceCacheFallback(
+            this.logger,
+            this.config.id,
+            this.config.model,
+            this.modelCost,
+            response.usage,
+          );
           this.logger?.log(
-            `[Sentinel:${this.config.id}] LLM call cost: $${cost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
+            `[Sentinel:${this.config.id}] LLM call cost: $${callCost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
             "info",
           );
         }
@@ -636,6 +729,8 @@ export class Sentinel {
               tokens: {
                 input: response.usage?.inputTokens || 0,
                 output: response.usage?.outputTokens || 0,
+                cachedInputTokens: response.usage?.cachedInputTokens,
+                cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
               },
               eventCount: 1,
             },
@@ -694,7 +789,15 @@ export class Sentinel {
           `[Sentinel:${this.config.id}] Conversational sentinels require a system prompt`,
         );
       }
-      const messages = await this.historyManager.getMessagesToSend(renderedSystemPrompt);
+      let messages = await this.historyManager.getMessagesToSend(renderedSystemPrompt);
+
+      // Apply Anthropic cache breakpoint to the last historical message BEFORE
+      // pushing the live current user. Storage stays string-form; helper clones.
+      const cacheOptions = this.buildCacheOptions();
+      if (cacheOptions) {
+        messages = applyAnthropicCacheControlBreakpoint(messages, cacheOptions);
+      }
+
       messages.push({ role: "user", content: userMessage });
 
       // Build options based on output mode
@@ -706,6 +809,7 @@ export class Sentinel {
         temperature: this.llmParams.temperature,
         maxOutputTokens: this.llmParams.maxOutputTokens,
         maxRetries: this.llmParams.maxRetries,
+        providerOptions: this.buildProviderOptions(),
       };
 
       // Add schema OR enum values depending on mode
@@ -720,16 +824,20 @@ export class Sentinel {
         // Track successful call
         this.trackSuccessfulLLMCall();
 
-        // Track cost
+        // Track cost (cache-aware)
         let callCost = 0;
         if (this.modelCost && response.usage) {
-          const cost =
-            (response.usage.inputTokens / 1_000_000) * this.modelCost.input +
-            (response.usage.outputTokens / 1_000_000) * this.modelCost.output;
-          this.totalCost += cost;
-          callCost = cost;
+          callCost = computeCost(response.usage, this.modelCost);
+          this.totalCost += callCost;
+          warnOnceCacheFallback(
+            this.logger,
+            this.config.id,
+            this.config.model,
+            this.modelCost,
+            response.usage,
+          );
           this.logger?.log(
-            `[Sentinel:${this.config.id}] LLM call cost: $${cost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
+            `[Sentinel:${this.config.id}] LLM call cost: $${callCost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
             "info",
           );
         }
@@ -763,6 +871,8 @@ export class Sentinel {
               tokens: {
                 input: response.usage?.inputTokens || 0,
                 output: response.usage?.outputTokens || 0,
+                cachedInputTokens: response.usage?.cachedInputTokens,
+                cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
               },
               eventCount: 1,
             },
@@ -820,6 +930,7 @@ export class Sentinel {
         temperature: this.llmParams.temperature,
         maxOutputTokens: this.llmParams.maxOutputTokens,
         maxRetries: this.llmParams.maxRetries,
+        providerOptions: this.buildProviderOptions(),
       };
 
       const options: HankweaveGenerateObjectOptions =
@@ -841,13 +952,17 @@ export class Sentinel {
 
         let callCost = 0;
         if (this.modelCost && response.usage) {
-          const cost =
-            (response.usage.inputTokens / 1_000_000) * this.modelCost.input +
-            (response.usage.outputTokens / 1_000_000) * this.modelCost.output;
-          this.totalCost += cost;
-          callCost = cost;
+          callCost = computeCost(response.usage, this.modelCost);
+          this.totalCost += callCost;
+          warnOnceCacheFallback(
+            this.logger,
+            this.config.id,
+            this.config.model,
+            this.modelCost,
+            response.usage,
+          );
           this.logger?.log(
-            `[Sentinel:${this.config.id}] LLM call cost: $${cost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
+            `[Sentinel:${this.config.id}] LLM call cost: $${callCost.toFixed(6)} (total: $${this.totalCost.toFixed(6)})`,
             "info",
           );
         }
@@ -878,6 +993,8 @@ export class Sentinel {
               tokens: {
                 input: response.usage?.inputTokens || 0,
                 output: response.usage?.outputTokens || 0,
+                cachedInputTokens: response.usage?.cachedInputTokens,
+                cacheCreationInputTokens: response.usage?.cacheCreationInputTokens,
               },
               eventCount: 1,
             },

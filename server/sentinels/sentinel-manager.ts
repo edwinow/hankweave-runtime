@@ -9,6 +9,8 @@ import type {
   HankweaveGenerateObjectResult,
   HankweaveGenerateTextOptions,
   HankweaveGenerateTextResult,
+  ModelCost,
+  ModelPricing,
 } from "../types/llm-call-types.js";
 import type { SentinelConfig } from "../types/sentinel-types.js";
 import { generateId, type Logger } from "../utils.js";
@@ -22,6 +24,18 @@ export interface SentinelManagerOptions {
   enablePersistence?: boolean; // Allow disabling persistence for testing
   providerRegistry?: LlmProviderRegistry;
   rootDirectory?: string; // Root directory for sentinel files (default: current working directory)
+}
+
+type AnthropicProviderMetadata = {
+  anthropic?: { cacheCreationInputTokens?: number | null };
+};
+
+export function getAnthropicCacheCreationInputTokens(
+  providerMetadata: unknown,
+): number | undefined {
+  const value = (providerMetadata as AnthropicProviderMetadata | undefined)?.anthropic
+    ?.cacheCreationInputTokens;
+  return typeof value === "number" ? value : undefined;
 }
 
 /**
@@ -428,6 +442,15 @@ export class SentinelManager {
 
           const finishReason = finishReasonMap[response.finishReason] ?? "other";
 
+          // Cache writes are reported under providerMetadata.anthropic
+          // (NOT in core usage). Cache reads are flat on usage.cachedInputTokens.
+          // For Anthropic, inputTokens excludes the cached portion per AI SDK v5.
+          // OpenAI reports cached tokens as a subset of inputTokens; computeCost
+          // handles that provider-specific distinction using ModelCost.providerId.
+          const cacheCreationInputTokens = getAnthropicCacheCreationInputTokens(
+            response.providerMetadata,
+          );
+
           // Return pure AI SDK subset (no cost calculation here)
           return {
             text: response.text,
@@ -435,18 +458,33 @@ export class SentinelManager {
             usage: {
               inputTokens: response.usage?.inputTokens || 0,
               outputTokens: response.usage?.outputTokens || 0,
+              cachedInputTokens: response.usage?.cachedInputTokens,
+              cacheCreationInputTokens,
             },
           };
         };
 
-        // Get model cost per million tokens for this sentinel
-        let modelCost: { input: number; output: number } | undefined;
+        // Get model cost per million tokens for this sentinel.
+        // Important: snake_case → camelCase rename. `models-dev-data.json` uses
+        // `cache_read` / `cache_write`; ModelCost downstream uses cacheRead/cacheWrite.
+        // The `anthropic` providerId resolver gotcha: haiku-4-5 has 10+ duplicate
+        // entries, several missing cache_write. The full-model-id lookup
+        // (e.g. "anthropic/claude-haiku-4-5") already disambiguates by provider id;
+        // we additionally log a warning if cache pricing is missing for a model
+        // when the call site reports cache activity.
+        let modelCost: ModelCost | undefined;
         if (config.model && hasRealProviders && isFullModelId) {
           const modelInfoResult = this.providerRegistry.getModelInfo(config.model);
           if (modelInfoResult.success && modelInfoResult.info.cost) {
-            const pricing = modelInfoResult.info.cost;
+            const pricing = modelInfoResult.info.cost as ModelPricing;
             if (pricing.input !== undefined && pricing.output !== undefined) {
-              modelCost = { input: pricing.input, output: pricing.output };
+              modelCost = {
+                providerId: modelInfoResult.info.providerId,
+                input: pricing.input,
+                output: pricing.output,
+                cacheRead: pricing.cache_read,
+                cacheWrite: pricing.cache_write,
+              };
             }
           }
         }
@@ -513,12 +551,18 @@ export class SentinelManager {
 
             const finishReason = finishReasonMap[response.finishReason] ?? "other";
 
+            const cacheCreationInputTokens = getAnthropicCacheCreationInputTokens(
+              response.providerMetadata,
+            );
+
             return {
               object: response.object,
               finishReason,
               usage: {
                 inputTokens: response.usage?.inputTokens || 0,
                 outputTokens: response.usage?.outputTokens || 0,
+                cachedInputTokens: response.usage?.cachedInputTokens,
+                cacheCreationInputTokens,
               },
             };
           };

@@ -560,4 +560,161 @@ describe("HistoryManager", () => {
       expect(messages[3].content).toBe('{"obj":"user"}');
     });
   });
+
+  describe("chunkedWindow Pruning", () => {
+    /**
+     * Simulate one full sentinel-call cycle:
+     * 1. getMessagesToSend(systemPrompt) — fires prune() pre-LLM
+     * 2. addMessagePair(...) — appends one new turn after the LLM responds
+     *
+     * Returns the user-message count from the prepared message array (not history)
+     * so we can assert what prune() retained at LLM-call time.
+     */
+    async function fireOnce(
+      hm: HistoryManager,
+      n: number,
+    ): Promise<{ messageCount: number; userCount: number }> {
+      const messages = await hm.getMessagesToSend("S");
+      const userCount = messages.filter((m) => m.role === "user").length;
+      await hm.addMessagePair(`user ${n}`, `asst ${n}`);
+      return { messageCount: messages.length, userCount };
+    }
+
+    test("backwards compat — existing maxTurns:50 unchanged", async () => {
+      const hm = new HistoryManager(
+        "compat",
+        CodonId("c1"),
+        { type: "maxTurns", maxTurns: 50 },
+        testDir,
+        logger,
+      );
+      // Fire 60 times. After 60 calls history holds 60 turns (120 messages),
+      // but prune at fire 51 onwards keeps it at 50 turns.
+      for (let i = 1; i <= 60; i++) await fireOnce(hm, i);
+      const messages = await hm.getMessagesToSend("S");
+      // System + 50 turns * 2 = 101
+      expect(messages.length).toBe(101);
+    });
+
+    test("boundary: shift fires at fire 72 for {maxTurns:70, shiftTurns:20}", async () => {
+      const hm = new HistoryManager(
+        "boundary",
+        CodonId("c1"),
+        { type: "chunkedWindow", maxTurns: 70, shiftTurns: 20 },
+        testDir,
+        logger,
+      );
+
+      // Fire 71 times. At fire 71, pre-LLM history has 70 turns; 70 > 70 is false → no shift.
+      // After fire 71, post-LLM history has 71 turns.
+      for (let i = 1; i <= 71; i++) await fireOnce(hm, i);
+      // Pre-LLM at fire 72: 71 stored turns → prune sees 71 > 70 → shift!
+      // Drops 20 turns → 51 retained pre-LLM.
+      const fire72 = await fireOnce(hm, 72);
+      // userCount in messages array (excluding system) reflects retained turns at LLM call time.
+      expect(fire72.userCount).toBe(51);
+      // System + 51 turns * 2 = 103
+      expect(fire72.messageCount).toBe(103);
+
+      // Sanity: at fire 71 there should be no shift (70 stored turns pre-LLM).
+      const hm2 = new HistoryManager(
+        "boundary2",
+        CodonId("c2"),
+        { type: "chunkedWindow", maxTurns: 70, shiftTurns: 20 },
+        testDir,
+        logger,
+      );
+      for (let i = 1; i <= 70; i++) await fireOnce(hm2, i);
+      const fire71 = await fireOnce(hm2, 71);
+      // Pre-LLM at fire 71: 70 turns → 70 > 70 false → no shift, 70 retained.
+      expect(fire71.userCount).toBe(70);
+    });
+
+    test("multiple shifts: fires happen at 72, 92, 112 for {70, 20}", async () => {
+      const hm = new HistoryManager(
+        "multi",
+        CodonId("c1"),
+        { type: "chunkedWindow", maxTurns: 70, shiftTurns: 20 },
+        testDir,
+        logger,
+      );
+      const userCounts: number[] = [];
+      for (let i = 1; i <= 130; i++) {
+        const r = await fireOnce(hm, i);
+        userCounts.push(r.userCount);
+      }
+      // Shifts at fires 72, 92, 112 — at those calls prune drops 20 turns.
+      // Pre-shift at fire 72: 71 → post-shift 51. Pre-shift fire 92: 71 → 51.
+      expect(userCounts[71]).toBe(51); // index 71 = fire 72
+      expect(userCounts[91]).toBe(51); // index 91 = fire 92
+      expect(userCounts[111]).toBe(51); // index 111 = fire 112
+      // Between shifts, count grows by 1 per fire (no prune on those).
+      expect(userCounts[72]).toBe(52); // fire 73
+      expect(userCounts[80]).toBe(60); // fire 81
+      expect(userCounts[90]).toBe(70); // fire 91 (pre-shift again)
+    });
+
+    test("edge case: shiftTurns=1 (sliding stride-1 once over cap)", async () => {
+      const hm = new HistoryManager(
+        "stride1",
+        CodonId("c1"),
+        { type: "chunkedWindow", maxTurns: 5, shiftTurns: 1 },
+        testDir,
+        logger,
+      );
+      const userCounts: number[] = [];
+      for (let i = 1; i <= 10; i++) {
+        const r = await fireOnce(hm, i);
+        userCounts.push(r.userCount);
+      }
+      // Fire 6: pre-LLM has 5 turns → 5 > 5 false → 5 retained.
+      // Fire 7: pre-LLM has 6 turns → 6 > 5 true → drop 1 → 5 retained.
+      // From fire 7 onward, retained stays at 5.
+      expect(userCounts[5]).toBe(5); // fire 6
+      expect(userCounts[6]).toBe(5); // fire 7 (post-shift)
+      expect(userCounts[9]).toBe(5); // fire 10
+    });
+
+    test("edge case: shiftTurns === maxTurns (full window flush each time)", async () => {
+      const hm = new HistoryManager(
+        "fullflush",
+        CodonId("c1"),
+        { type: "chunkedWindow", maxTurns: 5, shiftTurns: 5 },
+        testDir,
+        logger,
+      );
+      const userCounts: number[] = [];
+      for (let i = 1; i <= 12; i++) {
+        const r = await fireOnce(hm, i);
+        userCounts.push(r.userCount);
+      }
+      // Fire 6: pre-LLM has 5 → 5 > 5 false → 5 retained.
+      // Fire 7: pre-LLM has 6 → 6 > 5 true → drop 5 → 1 retained.
+      // Fire 8: pre-LLM has 2 → no shift → 2 retained.
+      // ... grows until fire 12: pre-LLM has 6 → drop 5 → 1 retained.
+      expect(userCounts[5]).toBe(5); // fire 6
+      expect(userCounts[6]).toBe(1); // fire 7 (full-window shift)
+      expect(userCounts[7]).toBe(2); // fire 8
+      expect(userCounts[11]).toBe(1); // fire 12 (next full-window shift)
+    });
+
+    test("shift log fires at the right call", async () => {
+      const hm = new HistoryManager(
+        "log",
+        CodonId("c1"),
+        { type: "chunkedWindow", maxTurns: 3, shiftTurns: 2 },
+        testDir,
+        logger,
+      );
+      logger.logs = [];
+      for (let i = 1; i <= 4; i++) await fireOnce(hm, i);
+      // Fire 4: pre-LLM has 3 turns → no shift.
+      const shiftLogsBefore = logger.logs.filter((l) => l.message.includes("chunkedWindow shift"));
+      expect(shiftLogsBefore.length).toBe(0);
+      // Fire 5: pre-LLM has 4 → 4 > 3 → shift, drop 2.
+      await fireOnce(hm, 5);
+      const shiftLogsAfter = logger.logs.filter((l) => l.message.includes("chunkedWindow shift"));
+      expect(shiftLogsAfter.length).toBe(1);
+    });
+  });
 });

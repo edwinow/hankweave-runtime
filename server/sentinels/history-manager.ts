@@ -201,6 +201,27 @@ export class HistoryManager {
           "info",
         );
       }
+    } else if (this.trimmingStrategy.type === "chunkedWindow") {
+      // Chunked-window strategy: when stored complete turns strictly exceed
+      // maxTurns, drop `shiftTurns` oldest turns in one chunk. This keeps the
+      // stable cacheable prefix steady for `shiftTurns` calls between shifts,
+      // unlike sliding `maxTurns` which mutates the prefix on every call past
+      // the cap.
+      const { maxTurns, shiftTurns } = this.trimmingStrategy;
+      const userMessages = this.history.filter((item) => item.message.role === "user").length;
+      const assistantMessages = this.history.filter(
+        (item) => item.message.role === "assistant",
+      ).length;
+      const completeTurns = Math.min(userMessages, assistantMessages);
+
+      if (completeTurns > maxTurns) {
+        const messagesToRemove = shiftTurns * 2; // Each turn = user + assistant
+        const removed = this.history.splice(0, messagesToRemove);
+        this.logger?.log(
+          `[HistoryManager:${this.sentinelId}] chunkedWindow shift: pruned ${removed.length} messages (${shiftTurns} turns) — completeTurns=${completeTurns} exceeded maxTurns=${maxTurns}`,
+          "info",
+        );
+      }
     } else if (this.trimmingStrategy.type === "maxTokens") {
       const maxTokens = this.trimmingStrategy.maxTokens;
 
