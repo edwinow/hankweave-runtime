@@ -3564,7 +3564,17 @@ export class HankweaveRuntime extends TypedEventEmitter<ServerInternalEvents> {
             new Error(`Copy group ${groupIndex} failed with: ${String(error)}`),
             beforeCopySuccess ? "codonOutputCopyFiles" : "codonOutputBeforeCopy",
           );
-          // Continue to next output group
+
+          if (this.currentRunId) {
+            this.stateManager.transition({
+              type: "RunFailed",
+              data: { runId: this.currentRunId },
+            });
+            await this.stateManager.waitForPendingTransitions();
+          }
+
+          await this.shutdown("codon failure");
+          return;
         }
       }
     }
@@ -6680,8 +6690,12 @@ export class HankweaveRuntime extends TypedEventEmitter<ServerInternalEvents> {
       let finalExitCode = exitCode;
       if (finalExitCode === undefined) {
         if (reason === "all codons completed") {
-          // Query state manager for run status (source of truth)
-          const currentRun = this.stateManager.getCurrentRun();
+          // RunCompleted/RunFailed clear currentRunId before process exit is
+          // computed, so use the pre-transition run reference captured above.
+          const currentRun = runForTelemetry
+            ? (this.stateManager.getState().runs.find((r) => r.runId === runForTelemetry.runId) ??
+              runForTelemetry)
+            : null;
           finalExitCode =
             currentRun?.status === "failed" || currentRun?.status === "crashed" ? 1 : 0;
         } else if (reason === "codon failure") {
